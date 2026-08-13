@@ -1,0 +1,21 @@
+services:
+  ca:
+    build: .
+    environment:
+      - EXPECTED_LABS=2
+      - INTERLAB_CHAIN_ID=4004
+    volumes:
+      - ca-data:/data
+    ports:
+      - "8000:8000"
+    networks:
+      default:
+        ipv4_address: 172.28.0.10
+
+networks:
+  default:
+    name: pkg-coordination
+    external: true
+
+volumes:
+  ca-data:

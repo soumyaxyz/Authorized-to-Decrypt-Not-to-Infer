@@ -1,0 +1,70 @@
+# LabA: a fully self-contained deployable. `docker compose up` here alone
+# gives a working lab -- own intra-lab chain, own IPFS, own MA-ABE
+# authority, zero knowledge of any other lab. Federation is opt-in: set
+# CA_URL and bring up the `federated` profile to join a coordination
+# authority and gain cross-lab disclosure.
+#
+# Static IPs on the coordination network, not hostnames -- see run_demo.sh
+# for why (Docker Desktop's embedded DNS on this host is unreliable enough
+# to just not depend on for this path).
+services:
+  intra-chain:
+    image: ghcr.io/foundry-rs/foundry:latest
+    entrypoint: ["anvil", "--host", "0.0.0.0"]
+    networks: [internal]
+
+  ipfs:
+    image: ipfs/kubo:latest
+    networks:
+      internal:
+      coordination:
+        ipv4_address: 172.28.1.20
+
+  app:
+    build: ../app
+    command: ["sleep", "infinity"]
+    environment:
+      - LAB_ID=LABA
+      - CA_URL=${CA_URL:-}
+      - INTRA_CHAIN_URL=http://intra-chain:8545
+      - INTERLAB_CHAIN_URL=http://172.28.1.10:8545
+      - IPFS_URL=http://ipfs:5001
+      - IPFS_COORDINATION_IP=172.28.1.20
+      - BESU_P2P_HOST=172.28.1.10
+      - BESU_P2P_PORT=30303
+    volumes:
+      - lab-data:/data
+      - besu-config:/besu-config
+    depends_on: [intra-chain, ipfs]
+    networks: [internal, coordination]
+
+  # Only started with `docker compose --profile federated up` -- this
+  # lab's peer of the shared interlab chain. Waits for node.py
+  # besu-bootstrap (run in `app`) to write genesis + peer config before
+  # actually starting the besu process.
+  besu:
+    image: hyperledger/besu:latest
+    profiles: [federated]
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        until [ -f /besu-config/genesis.json ]; do sleep 2; done &&
+        exec besu --genesis-file=/besu-config/genesis.json --data-path=/besu-config
+        --node-private-key-file=/besu-config/key.priv --rpc-http-enabled
+        --rpc-http-host=0.0.0.0 --rpc-http-port=8545 --rpc-http-api=ETH,QBFT,NET
+        --host-allowlist=* --p2p-host=172.28.1.10 --p2p-port=30303 --min-gas-price=0
+    volumes:
+      - besu-config:/besu-config
+    networks:
+      coordination:
+        ipv4_address: 172.28.1.10
+
+networks:
+  internal:
+  coordination:
+    name: pkg-coordination
+    external: true
+
+volumes:
+  lab-data:
+  besu-config:
