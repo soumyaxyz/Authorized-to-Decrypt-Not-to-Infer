@@ -1,7 +1,15 @@
-"""A tiny, manually-constructed personal knowledge graph (Alice's), plus
+"""A personal knowledge graph, persisted to disk as JSON-LD, plus
 selective-disclosure logic: choosing a policy-relevant subgraph to share
 rather than encrypting the whole graph or an arbitrary file.
+
+The graph is not rebuilt from scratch on every run. `load_or_seed_graph`
+loads whatever's already persisted for an owner, seeding it from a small
+starter graph only the first time a lab ever runs. `add_fact` +
+`save_graph` accumulate new triples across runs -- the same write path an
+agentic maintainer would eventually use.
 """
+
+from pathlib import Path
 
 from rdflib import Graph, Namespace, URIRef, Literal, RDF
 from rdflib.namespace import FOAF, XSD
@@ -57,6 +65,38 @@ def build_alice_graph() -> Graph:
     g.add((alice, PKG.hasActivity, activity))
 
     return g
+
+
+def _graph_path(data_dir, owner: str = "alice") -> Path:
+    return Path(data_dir) / "pkg" / f"{owner}.jsonld"
+
+
+def load_or_seed_graph(data_dir, owner: str = "alice") -> Graph:
+    """Load `owner`'s persisted graph from `data_dir/pkg/<owner>.jsonld`.
+    The first time a lab runs, that file doesn't exist yet, so this seeds
+    it from the built-in starter graph and persists that as the baseline --
+    every run after that loads what's actually on disk, including
+    whatever `add_fact` has appended since."""
+    path = _graph_path(data_dir, owner)
+    g = Graph()
+    g.bind("pkg", PKG)
+    g.bind("foaf", FOAF)
+    if path.exists():
+        g.parse(data=path.read_text(encoding="utf-8"), format="json-ld")
+    else:
+        g += build_alice_graph()
+        save_graph(g, data_dir, owner)
+    return g
+
+
+def save_graph(graph: Graph, data_dir, owner: str = "alice") -> None:
+    path = _graph_path(data_dir, owner)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(graph.serialize(format="json-ld", indent=2), encoding="utf-8")
+
+
+def add_fact(graph: Graph, subject: URIRef, predicate: URIRef, obj) -> None:
+    graph.add((subject, predicate, obj))
 
 
 def select_subgraph(graph: Graph, subject: URIRef, allowed_predicates: set) -> Graph:

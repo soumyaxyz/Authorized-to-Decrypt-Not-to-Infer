@@ -14,6 +14,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.exceptions import InvalidSignature
+from rdflib import Literal
 
 import crypto
 import chain as chain_mod
@@ -291,7 +292,7 @@ def cmd_publish(args):
     pp = _load_pp()
     public_keys = _gather_public_keys()
 
-    g = pkg_mod.build_alice_graph()
+    g = pkg_mod.load_or_seed_graph(DATA_DIR)
     fragment = pkg_mod.select_subgraph(g, pkg_mod.PKG.alice, pkg_mod.PROFILES[args.profile])
     plaintext = fragment.serialize(format="json-ld").encode("utf-8")
 
@@ -308,6 +309,16 @@ def cmd_publish(args):
     share_id = registry.publish_share(cid, content_hash, policy_hash, args.version)
     print(f"[{LAB_ID}] published '{args.profile}' fragment (policy: {args.policy}) "
           f"as share #{share_id} on {args.chain} chain -- cid={cid}")
+
+
+def cmd_add_fact(args):
+    g = pkg_mod.load_or_seed_graph(DATA_DIR)
+    predicate = pkg_mod.PKG[args.predicate]
+    obj = pkg_mod.PKG[args.value] if args.uri else Literal(args.value)
+    pkg_mod.add_fact(g, pkg_mod.PKG.alice, predicate, obj)
+    pkg_mod.save_graph(g, DATA_DIR)
+    print(f"[{LAB_ID}] added fact: alice pkg:{args.predicate} {args.value!r} "
+          f"-- {len(g)} triples now persisted (republish to disclose it)")
 
 
 def _storage_for_share(record: dict) -> "storage.IPFSStorage":
@@ -391,6 +402,12 @@ def main():
     p = sub.add_parser("import-key")
     p.add_argument("credential", help="the JSON payload from issue-key --export")
 
+    p = sub.add_parser("add-fact")
+    p.add_argument("predicate", help="bare predicate name in the pkg: namespace, e.g. researchInterest")
+    p.add_argument("value")
+    p.add_argument("--uri", action="store_true",
+                    help="treat value as a pkg: resource reference instead of a string literal")
+
     p = sub.add_parser("publish")
     p.add_argument("--profile", default="collaborator")
     p.add_argument("--policy", required=True)
@@ -412,6 +429,7 @@ def main():
         "besu-bootstrap": cmd_besu_bootstrap,
         "issue-key": cmd_issue_key,
         "import-key": cmd_import_key,
+        "add-fact": cmd_add_fact,
         "publish": cmd_publish,
         "decrypt": cmd_decrypt,
         "tamper-check": cmd_tamper_check,

@@ -15,6 +15,8 @@ services:
 
   ipfs:
     image: ipfs/kubo:latest
+    ports:
+      - "5011:5001"   # http://localhost:5011/webui -- Kubo's built-in UI
     networks:
       internal:
       coordination:
@@ -35,6 +37,25 @@ services:
     volumes:
       - lab-data:/data
       - besu-config:/besu-config
+    depends_on: [intra-chain, ipfs]
+    networks: [internal, coordination]
+
+  # Read-only status page (published shares, chain/IPFS health, federation
+  # state) -- http://localhost:9000. Never writes anything; just reads the
+  # same files/endpoints node.py itself reads from.
+  dashboard:
+    build: ../app
+    command: ["python3", "dashboard.py"]
+    environment:
+      - LAB_ID=LABA
+      - CA_URL=${CA_URL:-}
+      - INTRA_CHAIN_URL=http://intra-chain:8545
+      - INTERLAB_CHAIN_URL=http://172.28.1.10:8545
+      - IPFS_URL=http://ipfs:5001
+    ports:
+      - "9010:9000"
+    volumes:
+      - lab-data:/data
     depends_on: [intra-chain, ipfs]
     networks: [internal, coordination]
 

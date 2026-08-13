@@ -27,9 +27,13 @@ Three genuinely independent deployables, not one merged system:
   or an attribute key -- only public material passes through it.
 - **`app/`** -- the shared lab-node software both `lab-a/` and `lab-b/`
   build from:
-  - `pkg.py` -- a small manually-built RDFLib graph and selective-disclosure
-    logic (choosing a policy-relevant subgraph, not encrypting a whole
-    file).
+  - `pkg.py` -- an RDFLib graph persisted as JSON-LD at
+    `/data/pkg/<owner>.jsonld` (on the lab's own volume, never shared
+    between labs), plus selective-disclosure logic (choosing a
+    policy-relevant subgraph, not encrypting a whole file). A lab seeds the
+    file from a small starter graph the first time it runs; after that,
+    `publish` loads whatever's actually on disk, and `add-fact` appends new
+    triples that persist across runs and containers.
   - `crypto.py` -- hybrid encryption. Real multi-authority CP-ABE
     (charm-crypto's `MaabeRW15`, Rouselakis-Waters 2015) protects a random
     seed; AES-256-GCM protects the actual data. Each lab runs its own
@@ -60,6 +64,58 @@ generates or sees a validator's private key. Each lab then runs its own
 Besu node, peered directly with the others. Two independently-keyed
 validators reaching real consensus together (matching block hashes, not
 just matching block heights) is checked, not assumed.
+
+## Tests
+
+`app/tests/` and `ca/tests/` are pytest suites for the pure-logic pieces --
+crypto (real pairing operations, not mocked: multi-authority policy
+satisfaction/denial, tamper detection, every serialize/deserialize
+round-trip), PKG persistence and selective disclosure, besu identity
+derivation, QBFT genesis/extraData structure, and CA identity-credential
+signing. They don't need any chain/IPFS/CA container running -- each
+image already has everything required to run its own suite standalone:
+
+```bash
+docker build -t pkg-app-test ./app
+docker run --rm -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pkg-app-test python3 -m pytest tests/ -v
+
+docker build -t pkg-ca-test ./ca
+docker run --rm -e PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pkg-ca-test python3 -m pytest tests/ -v
+```
+
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` works around an unrelated bug: web3.py
+bundles an optional `pytest-ethereum` plugin that auto-registers itself via
+a setuptools entrypoint and fails to import against this project's pinned
+`eth_typing` version. Nothing here uses that plugin, so disabling
+entrypoint auto-loading is the actual fix, not a workaround being papered
+over.
+
+`run_demo.sh` remains the integration test -- it's the only thing that
+actually exercises real IPFS storage, two independently-keyed Besu
+validators reaching genuine QBFT consensus, and the full CA-mediated
+credential handoff, none of which a unit test can stand in for.
+
+## Dashboards
+
+Each deployable exposes a read-only status page -- no new state, just a
+window onto what `node.py`'s CLI commands already read: published shares
+(owner, cid, version, policy hash), chain height and contract address,
+IPFS peer/repo stats, federation/registration state, and issued key
+credentials. Auto-refreshes every 10s.
+
+| Deployable | URL |
+|---|---|
+| CA | http://localhost:8000/dashboard |
+| Lab A | http://localhost:9010 |
+| Lab B | http://localhost:9011 |
+| Lab A's IPFS node (Kubo's own web UI) | http://localhost:5011/webui |
+| Lab B's IPFS node (Kubo's own web UI) | http://localhost:5012/webui |
+
+These come up automatically with `docker compose up` in each directory (or
+via `run_demo.sh`) -- no extra flags needed. The IPFS web UI is Kubo's
+bundled tool, fetched over the node's own (still public-network-joined,
+per the simplifications below) IPFS connection, not something this repo
+ships.
 
 ## Quick start
 
@@ -97,6 +153,12 @@ docker compose exec -T app python3 node.py setup       # generates its own MA-AB
 docker compose exec -T app python3 node.py issue-key alice RESEARCHER
 docker compose exec -T app python3 node.py publish --policy "(RESEARCHER@LABA)" --chain intra --version 1
 docker compose exec -T app python3 node.py decrypt alice 0 --chain intra
+
+# add a fact -- persists to /data/pkg/alice.jsonld, survives container
+# restarts, and shows up in the next publish (as a new version)
+docker compose exec -T app python3 node.py add-fact researchInterest "Post-Quantum Cryptography"
+docker compose exec -T app python3 node.py publish --policy "(RESEARCHER@LABA)" --chain intra --version 2
+docker compose exec -T app python3 node.py decrypt alice 1 --chain intra
 ```
 
 No CA, no besu, no other lab involved anywhere in this path.
@@ -150,6 +212,16 @@ assuming a shared filesystem between labs.
   dynamic validator set changes on the interlab chain (adding a lab after
   genesis would need QBFT's validator-vote mechanism, which exists but
   isn't wired up here), no agentic layer yet.**
+- **Docker Desktop occasionally attaches a multi-network container (the
+  `dashboard` services in particular) to only one of its two networks on
+  `up`/recreate**, silently dropping the other -- the same class of
+  embedded-networking flakiness noted elsewhere in this file, just
+  surfacing as a dropped `docker network connect` instead of a failed DNS
+  lookup this time. Symptom: a dashboard page reports its own lab's chain
+  or the CA as unreachable even though everything is actually running.
+  Fix: `docker network connect <network> <container> && docker restart
+  <container>` -- no config changes needed, the compose file already lists
+  both networks correctly.
 
 ## Repo layout
 
@@ -157,9 +229,10 @@ assuming a shared filesystem between labs.
 base/              shared Docker base image (charm-crypto/PBC build)
 app/               lab-node software: pkg.py, crypto.py, storage.py,
                    chain.py, node.py, besu_identity.py, ca_client.py,
-                   retry.py, contract.sol, Dockerfile, requirements.txt
+                   dashboard.py, retry.py, contract.sol, Dockerfile,
+                   requirements.txt, tests/
 ca/                the coordination authority: app.py (Flask), ca_crypto.py,
-                   besu_genesis.py, Dockerfile, docker-compose.yml
+                   besu_genesis.py, Dockerfile, docker-compose.yml, tests/
 lab-a/, lab-b/     independently deployable labs, each with its own
                    docker-compose.yml (intra-chain, ipfs, app, besu)
 crypto-poc/        initial charm-crypto risk-retirement spike (superseded

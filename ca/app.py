@@ -141,5 +141,58 @@ def get_interlab_contract():
     return jsonify(json.loads(path.read_text()))
 
 
+def _row(*cells) -> str:
+    return "<tr>" + "".join(f"<td>{c}</td>" for c in cells) + "</tr>"
+
+
+@app.get("/dashboard")
+def dashboard():
+    """Read-only status page -- everything here is the same data the JSON
+    endpoints above already serve, just rendered as HTML instead of asking
+    someone to curl /labs and /genesis by hand."""
+    registry = _load_registry()
+    genesis_path = DATA_DIR / "genesis.json"
+    contract_path = DATA_DIR / "interlab_contract.json"
+
+    labs_rows = "".join(
+        _row(lab_id, info.get("besu_address", "")[:10] + "...",
+             f"{info.get('besu_host')}:{info.get('besu_port')}",
+             f"{info.get('ipfs_host')}:{info.get('ipfs_port')}")
+        for lab_id, info in registry.items()
+    ) or "<tr><td colspan='4'><em>no labs registered yet</em></td></tr>"
+
+    genesis_state = "not yet generated" if not genesis_path.exists() else "generated"
+    contract_state = "not yet reported" if not contract_path.exists() else \
+        json.loads(contract_path.read_text()).get("address", "reported")
+
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>CA dashboard</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 2rem; background: #0d1117; color: #c9d1d9; }}
+h1 {{ color: #58a6ff; }} h2 {{ color: #79c0ff; margin-top: 2rem; }}
+table {{ border-collapse: collapse; width: 100%; margin-top: 0.5rem; }}
+td, th {{ border: 1px solid #30363d; padding: 0.4rem 0.6rem; text-align: left; font-size: 0.85rem; }}
+th {{ background: #161b22; }}
+code {{ background: #161b22; padding: 0.1rem 0.3rem; border-radius: 3px; }}
+</style></head>
+<body>
+<h1>Coordination authority</h1>
+<p>expects {EXPECTED_LABS} lab(s) &middot; {len(registry)} registered
+   &middot; interlab chain id {CHAIN_ID}</p>
+
+<h2>Registered labs</h2>
+<table><tr><th>lab</th><th>besu address</th><th>besu p2p</th><th>ipfs api</th></tr>{labs_rows}</table>
+
+<h2>Interlab chain genesis</h2>
+<p>{genesis_state}</p>
+
+<h2>Interlab registry contract</h2>
+<p><code>{contract_state}</code></p>
+
+<p style="margin-top:2rem;color:#8b949e;font-size:0.8rem">auto-refreshes every 10s</p>
+<script>setTimeout(() => location.reload(), 10000)</script>
+</body></html>"""
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
