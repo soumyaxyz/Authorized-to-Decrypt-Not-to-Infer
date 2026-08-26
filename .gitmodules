@@ -1,0 +1,3 @@
+[submodule "manuscript"]
+	path = manuscript
+	url = https://git@git.overleaf.com/6a81f507cde49ed54119f4bb
