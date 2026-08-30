@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import time
 from pathlib import Path
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -21,6 +22,11 @@ import chain as chain_mod
 import storage
 import pkg as pkg_mod
 import besu_identity
+import gate as gate_mod
+import gate_pkg_adapter as gate_adapter
+from gate_mechanisms import MECHANISMS
+from gate_probabilistic import PosteriorLedger
+from gate_transcript import Transcript
 
 DATA_DIR = Path("/data")
 KEYS_DIR = DATA_DIR / "keys"
@@ -47,6 +53,25 @@ def _ca():
         )
     import ca_client
     return ca_client.CAClient(CA_URL)
+
+
+def _emit_result(check: str, outcome: str, latency_ms: float, **extra) -> None:
+    """One machine-parseable line per manuscript.pdf Table III check --
+    see report_table3.py, which turns a run_demo.sh log into that table.
+    Printed alongside, never instead of, the existing human-readable
+    line, so run_demo.sh's own output is unchanged."""
+    payload = {"lab": LAB_ID, "check": check, "outcome": outcome, "latency_ms": round(latency_ms, 2)}
+    payload.update(extra)
+    print("RESULT " + json.dumps(payload))
+
+
+def _gate_paths(coalition: str):
+    base = DATA_DIR / "gate"
+    return (
+        base / f"{coalition}.transcript.json",
+        base / f"{coalition}.ledger.json",
+        DATA_DIR / "gate_policy.json",
+    )
 
 
 def _pp_path():
@@ -289,6 +314,7 @@ def _registry(which: str) -> chain_mod.Registry:
 
 
 def cmd_publish(args):
+    t0 = time.perf_counter()
     pp = _load_pp()
     public_keys = _gather_public_keys()
 
@@ -307,8 +333,14 @@ def cmd_publish(args):
 
     registry = _registry(args.chain)
     share_id = registry.publish_share(cid, content_hash, policy_hash, args.version)
+    latency_ms = (time.perf_counter() - t0) * 1000
     print(f"[{LAB_ID}] published '{args.profile}' fragment (policy: {args.policy}) "
           f"as share #{share_id} on {args.chain} chain -- cid={cid}")
+    _emit_result(
+        "publish", "pass", latency_ms, chain=args.chain,
+        bytes_plaintext=len(plaintext), bytes_ciphertext=len(blob),
+        expansion_ratio=round(len(blob) / len(plaintext), 3) if plaintext else None,
+    )
 
 
 def cmd_add_fact(args):
@@ -342,11 +374,14 @@ def _storage_for_share(record: dict) -> "storage.IPFSStorage":
 
 
 def cmd_decrypt(args):
+    t0 = time.perf_counter()
     pp = _load_pp()
     try:
         user_keys = _load_user_keys(args.holder)
     except FileNotFoundError:
         print(f"[{LAB_ID}] {args.holder} DENIED: no key was ever issued to them")
+        _emit_result("decrypt", "denied_no_key", (time.perf_counter() - t0) * 1000,
+                      chain=args.chain, holder=args.holder)
         return
 
     registry = _registry(args.chain)
@@ -357,6 +392,8 @@ def cmd_decrypt(args):
 
     if hashlib.sha256(blob).digest() != record["content_hash"]:
         print(f"[{LAB_ID}] TAMPER DETECTED: stored blob doesn't match on-chain content hash")
+        _emit_result("decrypt", "tamper_detected", (time.perf_counter() - t0) * 1000,
+                      chain=args.chain, holder=args.holder)
         return
 
     package = crypto.bytes_to_package(blob)
@@ -364,24 +401,95 @@ def cmd_decrypt(args):
         plaintext = crypto.decrypt_with_attributes(pp, user_keys, package)
     except ValueError as e:
         print(f"[{LAB_ID}] {args.holder} DENIED: {e}")
+        _emit_result("decrypt", "denied_policy", (time.perf_counter() - t0) * 1000,
+                      chain=args.chain, holder=args.holder)
         return
 
     fragment = json.loads(plaintext)
+    latency_ms = (time.perf_counter() - t0) * 1000
     print(f"[{LAB_ID}] {args.holder} decrypted share #{args.share_id} successfully "
           f"-- {len(fragment)} JSON-LD node(s) recovered")
+    _emit_result("decrypt", "pass", latency_ms, chain=args.chain, holder=args.holder,
+                 bytes_plaintext=len(plaintext))
 
 
 def cmd_tamper_check(args):
+    t0 = time.perf_counter()
     registry = _registry(args.chain)
     record = registry.get_share(args.share_id)
     store = _storage_for_share(record)
     blob = bytearray(store.get(record["cid"]))
     blob[0] ^= 0xFF
     tampered = bytes(blob)
+    latency_ms = (time.perf_counter() - t0) * 1000
     if hashlib.sha256(tampered).digest() != record["content_hash"]:
         print(f"[{LAB_ID}] tamper check: corrupted blob correctly rejected (hash mismatch)")
+        _emit_result("tamper_check", "pass", latency_ms, chain=args.chain)
     else:
         print(f"[{LAB_ID}] tamper check FAILED: corruption went undetected")
+        _emit_result("tamper_check", "fail", latency_ms, chain=args.chain)
+
+
+def cmd_publish_gated(args):
+    """Routes a fragment through the Q3 stateful gate (see gate.py) before
+    it ever reaches Q2's encrypt/store/record pipeline -- the architecture
+    manuscript.pdf Fig. 2 describes. `--mechanism q2_selector` reproduces
+    today's plain `publish` for comparison; the other mechanisms in
+    gate_mechanisms.MECHANISMS are Table I's actual comparison set."""
+    t0 = time.perf_counter()
+    pp = _load_pp()
+    public_keys = _gather_public_keys()
+
+    g = pkg_mod.load_or_seed_graph(DATA_DIR)
+    fragment = pkg_mod.select_subgraph(g, pkg_mod.PKG.alice, pkg_mod.PROFILES[args.profile])
+    full_facts = gate_adapter.graph_to_triples(fragment)
+
+    transcript_path, ledger_path, policy_path = _gate_paths(args.coalition)
+    policy = gate_mod.GatePolicy.load(policy_path)
+    transcript = Transcript.load_or_new(transcript_path, args.coalition)
+    ledger = (PosteriorLedger.from_dict(json.loads(ledger_path.read_text()))
+              if ledger_path.exists() else PosteriorLedger())
+
+    gate_t0 = time.perf_counter()
+    decision = gate_mod.run_round(args.mechanism, policy, transcript, full_facts, args.query_predicate, ledger)
+    gate_latency_ms = (time.perf_counter() - gate_t0) * 1000
+
+    transcript.save(transcript_path)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(json.dumps(ledger.to_dict(), indent=2))
+
+    print(f"[{LAB_ID}] gate[{args.mechanism}] coalition={args.coalition} query={args.query_predicate} "
+          f"-> mode={decision.chosen.mode} triples_released={len(decision.chosen.response)} "
+          f"reason={decision.reason or 'ok'}")
+    _emit_result("gate_round", decision.chosen.mode, gate_latency_ms,
+                 mechanism=args.mechanism, coalition=args.coalition)
+
+    if not decision.chosen.response:
+        print(f"[{LAB_ID}] gate approved a refusal -- nothing published this round")
+        return
+
+    approved_fragment = gate_adapter.triples_to_graph(decision.chosen.response)
+    plaintext = approved_fragment.serialize(format="json-ld").encode("utf-8")
+
+    package = crypto.encrypt_for_policy(pp, public_keys, plaintext, args.policy)
+    blob = crypto.package_to_bytes(package)
+
+    store = storage.IPFSStorage(api_url=IPFS_URL)
+    cid = store.put(blob)
+
+    content_hash = hashlib.sha256(blob).digest()
+    policy_hash = hashlib.sha256(args.policy.encode()).digest()
+
+    registry = _registry(args.chain)
+    share_id = registry.publish_share(cid, content_hash, policy_hash, args.version)
+    latency_ms = (time.perf_counter() - t0) * 1000
+    print(f"[{LAB_ID}] published gated '{args.profile}' fragment (policy: {args.policy}) "
+          f"as share #{share_id} on {args.chain} chain -- cid={cid}")
+    _emit_result(
+        "publish", "pass", latency_ms, chain=args.chain, mechanism=args.mechanism,
+        bytes_plaintext=len(plaintext), bytes_ciphertext=len(blob),
+        expansion_ratio=round(len(blob) / len(plaintext), 3) if plaintext else None,
+    )
 
 
 def main():
@@ -423,6 +531,17 @@ def main():
     p.add_argument("share_id", type=int)
     p.add_argument("--chain", choices=["intra", "interlab"], default="intra")
 
+    p = sub.add_parser("publish-gated", help="publish a fragment through the Q3 stateful gate (see gate.py)")
+    p.add_argument("--profile", default="collaborator")
+    p.add_argument("--policy", required=True)
+    p.add_argument("--chain", choices=["intra", "interlab"], default="intra")
+    p.add_argument("--version", type=int, default=1)
+    p.add_argument("--mechanism", choices=sorted(MECHANISMS), default="hybrid_gate")
+    p.add_argument("--query-predicate", dest="query_predicate", required=True,
+                    help="the pkg: predicate this round's request is about, e.g. researchInterest")
+    p.add_argument("--coalition", default="default",
+                    help="pools history across requesters who declare they're colluding (SS III-B)")
+
     args = parser.parse_args()
     handlers = {
         "setup": cmd_setup,
@@ -433,6 +552,7 @@ def main():
         "publish": cmd_publish,
         "decrypt": cmd_decrypt,
         "tamper-check": cmd_tamper_check,
+        "publish-gated": cmd_publish_gated,
     }
     handlers[args.command](args)
 

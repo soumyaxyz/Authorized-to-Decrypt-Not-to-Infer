@@ -13,6 +13,15 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# Every subsequent line of this script's own stdout/stderr (including
+# whatever run_a/run_b's `docker compose exec` calls print, which is
+# where node.py's `RESULT {json}` lines for Table III come from) is
+# captured here so report_table3.py has something to parse afterward --
+# without reproducing this project's flaky-DNS retry logic around a
+# second, separate docker-logs collection step.
+LOG_FILE="demo.log"
+exec > >(tee "$LOG_FILE") 2>&1
+
 export CA_URL=http://172.28.0.10:8000
 
 run_a() { docker compose -p lab-a -f lab-a/docker-compose.yml exec -T app python3 node.py "$@"; }
@@ -85,4 +94,18 @@ echo "=== Experiment 4: tamper detection ==="
 run_b tamper-check 1 --chain interlab
 
 echo
+echo "=== Experiment 5: Q3 stateful gate (see app/gate.py) sits in front of" \
+     "the same Q2 pipeline -- 'hybrid_gate' with no declared policy falls" \
+     "back to its safe default (approve everything, nothing declared" \
+     "protected yet); see app/example_gate_policy.json and PLANS.md for" \
+     "the Figure-1 mosaic worked example this doesn't wire in automatically ==="
+run_a publish-gated --mechanism hybrid_gate --query-predicate researchInterest \
+  --policy "(RESEARCHER@LABA)" --chain intra --version 3
+run_a decrypt bob 1 --chain intra
+
+echo
 echo "=== Done ==="
+echo
+echo "=== Table III (manuscript.pdf SS VI.C) -- computed from this run's own RESULT lines ==="
+python3 app/report_table3.py "$LOG_FILE" \
+  || echo "(install python3 on the host to render Table III automatically; the raw RESULT lines are still in $LOG_FILE)"

@@ -1,0 +1,13 @@
+{
+  "_description": "Illustrative only -- manuscript.pdf Figure 1's mosaic (Alice reserves instrument I; I is the sole use of project Orchid this week => Alice is a member of Orchid) in the gate's generic (subject, predicate, object) triple vocabulary. It is NOT expressed in pkg.py's actual PKG namespace/schema -- declaring a real protected-fact policy for the shipped Alice graph is a modeling decision for whoever deploys this, not something to copy verbatim. Copy this to /data/gate_policy.json to see `publish-gated --mechanism stateful_logical` (or hybrid_gate) actually block the second half of this exact scenario; see gate_mechanisms.py and PLANS.md.",
+  "rules": [
+    {
+      "body": [["?a", "reserves", "?i"], ["?p", "soleUserOf", "?i"]],
+      "head": ["?a", "memberOf", "?p"]
+    }
+  ],
+  "protected": [
+    ["alice", "memberOf", "orchid"]
+  ],
+  "background": []
+}

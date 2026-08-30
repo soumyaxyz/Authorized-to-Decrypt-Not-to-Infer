@@ -7,6 +7,26 @@ blob goes to off-chain storage, and only a verifiable metadata record
 (content hash, policy hash, CID, version, timestamp -- never plaintext or
 keys) goes on-chain.
 
+## Relationship to the paper
+
+`manuscript.pdf` (mirrored at the repo root for machines without Overleaf
+access -- see `ops/git-hooks/pre-commit`) frames this project as three
+questions. **Q1** (build a personal/lab graph from mailboxes and records)
+is a separate companion project's job, not this repo's -- `pkg.py`'s seed
+graph is a fixture standing in for Q1's output. **Q2** (encrypt an
+approved fragment and deliver it verifiably) is everything described
+below under Architecture; the paper explicitly freezes it as a narrow
+delivery substrate and states exactly what it does and doesn't certify
+(see "Known POC simplifications"). **Q3** -- deciding whether the
+*cumulative* history of individually-approved disclosures is safe, the
+paper's actual contribution (its title's "not to infer" half) -- is
+`gate.py` and the `gate_*.py` modules: a stateful semantic gate that sits
+between graph construction and Q2's encrypt/store/record pipeline
+(`node.py publish-gated`). It is a first working implementation of the
+paper's core equations at small, declared scale, not the frozen,
+full-scale experimental apparatus the paper's Results section still needs
+-- see `PLANS.md` for exactly what's left and why.
+
 ## Architecture
 
 Three genuinely independent deployables, not one merged system:
@@ -45,12 +65,20 @@ Three genuinely independent deployables, not one merged system:
   - `chain.py` / `contract.sol` -- an append-only on-chain registry of who
     published what, when, and under what policy.
   - `node.py` -- the lab CLI: setup, issue-key, publish, decrypt,
-    tamper-check.
+    tamper-check, publish-gated.
   - `besu_identity.py` -- a lab's Besu validator identity (key generated
     locally, never shared; address/pubkey derived in pure Python, no besu
     binary needed for this).
   - `ca_client.py` -- the (entirely optional) HTTP client for talking to
     the CA.
+  - `gate.py`, `gate_rules.py`, `gate_logical.py`, `gate_probabilistic.py`,
+    `gate_candidates.py`, `gate_transcript.py`, `gate_mechanisms.py`,
+    `gate_metrics.py`, `gate_pkg_adapter.py` -- the Q3 stateful semantic
+    gate (see "Q3: the stateful semantic gate" below). Pure stdlib except
+    for the rdflib adapter; nothing here needs charm-crypto or a running
+    chain, so it's independently testable.
+  - `report_table3.py` -- turns a `run_demo.sh` log into manuscript.pdf's
+    Table III (see "Q2 delivery measurements (Table III)" below).
 - **`base/`** -- the shared Docker base image (charm-crypto's PBC build)
   both `app/` and `ca/` extend, so the slow compile happens once.
 
@@ -71,9 +99,12 @@ just matching block heights) is checked, not assumed.
 crypto (real pairing operations, not mocked: multi-authority policy
 satisfaction/denial, tamper detection, every serialize/deserialize
 round-trip), PKG persistence and selective disclosure, besu identity
-derivation, QBFT genesis/extraData structure, and CA identity-credential
-signing. They don't need any chain/IPFS/CA container running -- each
-image already has everything required to run its own suite standalone:
+derivation, QBFT genesis/extraData structure, CA identity-credential
+signing, and the Q3 gate (Horn-rule closure, logical opacity, the
+posterior-odds ledger, a full reproduction of manuscript.pdf Figure 1
+across every mechanism in Table I, and the Table III report generator).
+They don't need any chain/IPFS/CA container running -- each image already
+has everything required to run its own suite standalone:
 
 ```bash
 docker build -t pkg-app-test ./app
@@ -190,6 +221,58 @@ not the recipient's home lab.
 modeling that a key-share physically has to reach its holder somehow, not
 assuming a shared filesystem between labs.
 
+## Q3: the stateful semantic gate
+
+`publish-gated` runs a fragment through `gate.py` before it ever reaches
+Q2's encrypt/store/record pipeline, implementing manuscript.pdf's Fig. 2
+architecture end to end:
+
+```bash
+docker compose -p lab-a -f lab-a/docker-compose.yml exec -T app python3 node.py \
+  publish-gated --mechanism hybrid_gate --query-predicate researchInterest \
+  --policy "(RESEARCHER@LABA)" --chain intra --version 3
+```
+
+`--mechanism` selects one of Table I's release policies
+(`gate_mechanisms.MECHANISMS`): `q2_selector` reproduces today's plain
+`publish` (no gate at all) for comparison; `explicit_redaction`,
+`task_minimal`, and `stateless_censor` are the other ad hoc baselines;
+`stateful_logical` and `hybrid_gate` are the two that actually check the
+accumulated transcript. `--coalition` pools history across requesters who
+declare they're colluding (a shared transcript file), matching SS III-B's
+point that a per-login history is not a meaningful defense against
+transcript pooling.
+
+Sigma (rules), P (protected triples), KB (background facts), and the
+declared probabilistic model family Theta all come from
+`/data/gate_policy.json` if present -- see `app/example_gate_policy.json`
+for the schema, a worked (illustrative, non-PKG-schema) reproduction of
+Figure 1's mosaic. **A missing policy file means nothing is declared
+protected, so every mechanism degrades to "approve everything" -- a safe
+default, not a substitute for actually declaring a policy.** This is a
+first working implementation of the paper's equations (Definition 1,
+Eq. 5, Eq. 7-8) at small, declared scale -- see `PLANS.md` for what a real
+Sigma/P/KB/Theta, an attacker suite, and the generated-laboratory
+evaluation tier still need.
+
+## Q2 delivery measurements (Table III)
+
+`node.py` prints one `RESULT {json}` line per check (publish, decrypt,
+tamper-check, gate round) alongside its existing human-readable output --
+outcome, latency, and for publish/decrypt the plaintext/ciphertext byte
+sizes. `run_demo.sh` now tees its own run to `demo.log` and renders
+manuscript.pdf's Table III from it at the end:
+
+```bash
+bash run_demo.sh                        # writes demo.log as it runs
+python3 app/report_table3.py demo.log   # or re-run this any time afterward
+```
+
+A check with no matching `RESULT` lines is reported as `n/a`, never
+silently rounded to 0% or 100%. This only fills Table III (Q2 delivery
+checks, all achievable with what's already implemented) -- Table II needs
+the generated-laboratory harness described in `PLANS.md`.
+
 ## Known POC simplifications
 
 - **Cross-lab IPFS reads go directly at the publishing lab's HTTP API**
@@ -208,10 +291,20 @@ assuming a shared filesystem between labs.
   against charm's actual `MaabeRW15`/`abenc_bsw07` source (separate G1/G2
   groups throughout, a genuine Type-3 construction) rather than assumed;
   still worth a real crypto review before this goes near real data.
-- **No automatic PKG construction, no attribute/credential revocation, no
-  dynamic validator set changes on the interlab chain (adding a lab after
-  genesis would need QBFT's validator-vote mechanism, which exists but
-  isn't wired up here), no agentic layer yet.**
+- **No automatic PKG construction** (that's a separate companion project's
+  job -- see "Relationship to the paper"), **no attribute/credential
+  revocation, no dynamic validator set changes on the interlab chain**
+  (adding a lab after genesis would need QBFT's validator-vote mechanism,
+  which exists but isn't wired up here).
+- **The Q3 gate (`gate.py`) is a first working implementation at small,
+  declared scale, not the paper's frozen experimental apparatus.** Its
+  candidate ladder's "generalized"/"aggregate" transformations are generic
+  stand-ins, not the paper's real generalization semantics; its
+  probabilistic model family Theta must be hand-declared (no estimation
+  from data); it has no attacker implementations, no exact-micro-world
+  exhaustive enumeration at paper scale, and no integration with the
+  generated-laboratory environment Table II's numbers depend on. See
+  `PLANS.md`.
 - **Docker Desktop occasionally attaches a multi-network container (the
   `dashboard` services in particular) to only one of its two networks on
   `up`/recreate**, silently dropping the other -- the same class of
@@ -231,6 +324,11 @@ app/               lab-node software: pkg.py, crypto.py, storage.py,
                    chain.py, node.py, besu_identity.py, ca_client.py,
                    dashboard.py, retry.py, contract.sol, Dockerfile,
                    requirements.txt, tests/
+                   -- Q3 gate: gate.py, gate_rules.py, gate_logical.py,
+                   gate_probabilistic.py, gate_candidates.py,
+                   gate_transcript.py, gate_mechanisms.py, gate_metrics.py,
+                   gate_pkg_adapter.py, example_gate_policy.json
+                   -- Table III: report_table3.py
 ca/                the coordination authority: app.py (Flask), ca_crypto.py,
                    besu_genesis.py, Dockerfile, docker-compose.yml, tests/
 lab-a/, lab-b/     independently deployable labs, each with its own
@@ -238,4 +336,7 @@ lab-a/, lab-b/     independently deployable labs, each with its own
 crypto-poc/        initial charm-crypto risk-retirement spike (superseded
                    by app/, kept for reference)
 run_demo.sh        orchestrates ca/ + lab-a/ + lab-b/ for the full demo
+manuscript.pdf     mirrored compiled paper (see "Relationship to the paper")
+PLANS.md           what this repo still needs to match the paper, and why
+                   it needs a human/research decision rather than more code
 ```
