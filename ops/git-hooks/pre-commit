@@ -1,6 +1,6 @@
 #!/bin/sh
 # Auto-mirrors the compiled Overleaf manuscript PDF (manuscript/main.pdf) up to the repo
-# root as manuscript.pdf on every commit, so machines without Overleaf git credentials
+# root as manuscript-ADNI.pdf on every commit, so machines without Overleaf git credentials
 # get the current PDF from a plain `git pull` on this repo.
 #
 # Best-effort: tries to fetch the latest from Overleaf first, but never blocks the commit
@@ -13,7 +13,7 @@
 repo_root=$(git rev-parse --show-toplevel)
 manuscript_dir="$repo_root/manuscript"
 src="$manuscript_dir/main.pdf"
-dst="$repo_root/manuscript.pdf"
+dst="$repo_root/manuscript-ADNI.pdf"
 
 if [ -e "$manuscript_dir/.git" ]; then
     (cd "$manuscript_dir" && git pull --ff-only origin main) >/dev/null 2>&1 || true
@@ -23,7 +23,7 @@ if [ -f "$src" ]; then
     if ! cmp -s "$src" "$dst" 2>/dev/null; then
         cp "$src" "$dst"
         git add "$dst"
-        echo "pre-commit: refreshed manuscript.pdf from manuscript/main.pdf"
+        echo "pre-commit: refreshed manuscript-ADNI.pdf from manuscript/main.pdf"
     fi
 fi
 
