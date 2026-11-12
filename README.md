@@ -9,8 +9,8 @@ keys) goes on-chain.
 
 ## Relationship to the paper
 
-`manuscript.pdf` (mirrored at the repo root for machines without Overleaf
-access -- see `ops/git-hooks/pre-commit`) frames this project as three
+The paper (self-hosted Overleaf; never committed here -- a local build is
+kept at `manuscript-ADNI.pdf`, gitignored) frames this project as three
 questions. **Q1** (build a personal/lab graph from mailboxes and records)
 is a separate companion project's job, not this repo's -- `pkg.py`'s seed
 graph is a fixture standing in for Q1's output. **Q2** (encrypt an
@@ -336,7 +336,6 @@ lab-a/, lab-b/     independently deployable labs, each with its own
 crypto-poc/        initial charm-crypto risk-retirement spike (superseded
                    by app/, kept for reference)
 run_demo.sh        orchestrates ca/ + lab-a/ + lab-b/ for the full demo
-manuscript.pdf     mirrored compiled paper (see "Relationship to the paper")
 PLANS.md           what this repo still needs to match the paper, and why
                    it needs a human/research decision rather than more code
 ```

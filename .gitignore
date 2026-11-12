@@ -3,3 +3,7 @@ __pycache__/
 *.log
 .DS_Store
 .pytest_cache/
+
+# Manuscript PDF: local build from self-hosted Overleaf, never committed
+/manuscript-ADNI.pdf
+/manuscript.pdf
